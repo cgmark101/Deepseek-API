@@ -129,30 +129,102 @@ def stream_chunks(model: str, stream: Iterable[tuple[str, str]], emulate_tools: 
     yield frame({"role": "assistant"})
     
     finish_reason = "stop"
+    stream_iterator = iter(stream)
     
     if emulate_tools:
-        from .tool_emulator import StreamToolParser
-        parser = StreamToolParser()
+        buffer_text = ""
+        is_tool_call = False
+        detection_chars_needed = 60
         
-        for chunk_type, d in stream:
+        # Pull chunks until we can determine if it starts a tool call
+        for chunk_type, d in stream_iterator:
             if not d:
                 continue
             if chunk_type == "thinking":
                 yield frame({"reasoning_content": d})
             else:
-                for delta in parser.feed(d):
-                    if "tool_calls" in delta:
-                        finish_reason = "tool_calls"
-                        yield frame(delta)
-                    elif "content" in delta:
-                        yield frame({"content": delta["content"]})
-                        
-        # Flush any remaining text in the parser's buffer
-        for delta in parser.flush():
-            if "content" in delta:
-                yield frame({"content": delta["content"]})
+                buffer_text += d
+                # If we have gathered enough content characters, check for tool call
+                if len(buffer_text) >= detection_chars_needed:
+                    break
+                    
+        stripped = buffer_text.strip()
+        if stripped.startswith("```") or stripped.startswith("{") or "tool_calls" in stripped:
+            is_tool_call = True
+            
+        if is_tool_call:
+            # Buffer the rest of the stream
+            for chunk_type, d in stream_iterator:
+                if d and chunk_type == "content":
+                    buffer_text += d
+                    
+            # Parse the tool call from the complete buffer
+            tool_calls = None
+            start = buffer_text.find("{")
+            end = buffer_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(buffer_text[start:end+1])
+                    if "tool_calls" in data and isinstance(data["tool_calls"], list):
+                        tool_calls = []
+                        for raw_tc in data["tool_calls"]:
+                            args = raw_tc.get("arguments", {})
+                            args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+                            tc = {
+                                "id": "call_" + uuid.uuid4().hex[:8],
+                                "type": "function",
+                                "function": {
+                                    "name": raw_tc.get("name"),
+                                    "arguments": args_str
+                                }
+                            }
+                            tool_calls.append(tc)
+                except Exception as e:
+                    print(f"[server] Warning: Failed to parse tool call JSON in stream: {e}")
+                    
+            if tool_calls:
+                # Phase 1: Emit metadata and function name
+                init_tc_list = []
+                for idx, tc in enumerate(tool_calls):
+                    init_tc_list.append({
+                        "index": idx,
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": ""
+                        }
+                    })
+                yield frame({"role": "assistant", "tool_calls": init_tc_list})
+                
+                # Phase 2: Emit arguments string
+                args_tc_list = []
+                for idx, tc in enumerate(tool_calls):
+                    args_tc_list.append({
+                        "index": idx,
+                        "function": {
+                            "arguments": tc["function"]["arguments"]
+                        }
+                    })
+                yield frame({"tool_calls": args_tc_list})
+                finish_reason = "tool_calls"
+            else:
+                # False alarm: yield buffered text first as content
+                if buffer_text:
+                    yield frame({"content": buffer_text})
+        else:
+            # Yield buffered text first
+            if buffer_text:
+                yield frame({"content": buffer_text})
+            # Continue streaming normally
+            for chunk_type, d in stream_iterator:
+                if d:
+                    if chunk_type == "thinking":
+                        yield frame({"reasoning_content": d})
+                    else:
+                        yield frame({"content": d})
     else:
-        for chunk_type, d in stream:
+        for chunk_type, d in stream_iterator:
             if d:
                 if chunk_type == "thinking":
                     yield frame({"reasoning_content": d})
