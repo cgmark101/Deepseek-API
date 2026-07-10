@@ -14,6 +14,10 @@ SERVER_INTERACTIVE_LOGIN = os.getenv("SERVER_INTERACTIVE_LOGIN", "1").lower() no
     "0", "false", "no", "off",
 )
 
+CLEANUP_EPHEMERAL_CHATS = os.getenv("CLEANUP_EPHEMERAL_CHATS", "1").lower() not in (
+    "0", "false", "no", "off",
+)
+
 # Public model ids the server advertises (via /v1/models) and accepts, mapped to
 # DeepSeek's `model_type` wire value. This is the MODEL axis ONLY — it picks
 # which model answers. DeepThink and web Search are orthogonal tools requested

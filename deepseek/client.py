@@ -185,6 +185,11 @@ class DeepSeekClient:
     def close(self) -> None:
         self._http.close()
 
+    def delete_chat_session(self, session_id: str) -> None:
+        """Delete a chat session on DeepSeek's backend to keep the sidebar clean."""
+        r = self._http.post("/api/v0/chat_session/delete", json={"chat_session_id": session_id})
+        r.raise_for_status()
+
 
 class _Stream:
     """Iterable of reply-text chunks. After it's consumed, `.conversation_id`
@@ -201,6 +206,10 @@ class _Stream:
         self._thinking = thinking
         self._search = search
         self._message_id: Optional[int] = None
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     def __iter__(self) -> Iterator[str]:
         body = {

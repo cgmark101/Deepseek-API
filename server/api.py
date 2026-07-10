@@ -43,6 +43,7 @@ from .config import (
     MODEL_MAP,
     RATE_LIMIT_PER_MINUTE,
     SERVER_INTERACTIVE_LOGIN,
+    CLEANUP_EPHEMERAL_CHATS,
     is_known_model,
     resolve_model_type,
 )
@@ -318,6 +319,7 @@ async def chat_completions(
         if req.stream:
             def gen():
                 global _active_completions
+                stream = None
                 try:
                     stream = client.stream(
                         prompt, conversation_id=req.conversation_id,
@@ -325,6 +327,11 @@ async def chat_completions(
                     )
                     yield from stream_chunks(req.model, stream)
                 finally:
+                    if CLEANUP_EPHEMERAL_CHATS and not req.conversation_id and stream is not None:
+                        try:
+                            client.delete_chat_session(stream.session_id)
+                        except Exception as e:
+                            print(f"[server] Warning: Failed to delete ephemeral session: {e}")
                     with _active_completions_lock:
                         _active_completions -= 1
 
@@ -335,6 +342,12 @@ async def chat_completions(
                 client.chat, prompt, req.conversation_id,
                 model_type, req.thinking, req.search,
             )
+            if CLEANUP_EPHEMERAL_CHATS and not req.conversation_id:
+                try:
+                    session_id, _, _ = reply.conversation_id.partition(":")
+                    await run_in_threadpool(client.delete_chat_session, session_id)
+                except Exception as e:
+                    print(f"[server] Warning: Failed to delete ephemeral session: {e}")
         except Exception as e:
             return _error(f"DeepSeek request failed: {e}")
 
