@@ -23,9 +23,14 @@ from __future__ import annotations
 
 import threading
 import time
+import os
+import zipfile
+import shutil
+import json
+from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -95,6 +100,61 @@ def list_models():
             for name in MODEL_MAP
         ],
     }
+
+
+@app.post("/v1/session/import")
+async def import_session(
+    file: UploadFile = File(...),
+    x_import_key: str | None = Header(None, alias="X-Import-Key")
+):
+    import_key = os.getenv("SESSION_IMPORT_KEY")
+    if import_key and x_import_key != import_key:
+        return _error("Forbidden: Invalid X-Import-Key", status=403, err_type="forbidden")
+
+    root = Path(__file__).resolve().parent.parent
+    session_dir = root / "session"
+
+    filename = file.filename or ""
+    if not (filename.endswith(".zip") or filename.endswith(".json")):
+        return _error("Unsupported file format. Please upload a .zip or .json file.", status=400, err_type="invalid_request_error")
+
+    try:
+        if filename.endswith(".json"):
+            session_dir.mkdir(parents=True, exist_ok=True)
+            session_file = session_dir / "session.json"
+            content = await file.read()
+            try:
+                json.loads(content)
+            except Exception:
+                return _error("Invalid JSON content", status=400, err_type="invalid_request_error")
+            session_file.write_bytes(content)
+        else:
+            temp_zip_path = root / "temp_session.zip"
+            with open(temp_zip_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+
+            try:
+                with zipfile.ZipFile(temp_zip_path, "r") as zip_ref:
+                    for member in zip_ref.namelist():
+                        member_path = Path(member)
+                        if member_path.is_absolute() or ".." in member_path.parts:
+                            return _error(f"Security error: Invalid path in ZIP: {member}", status=400, err_type="invalid_request_error")
+
+                    if session_dir.exists():
+                        shutil.rmtree(session_dir)
+                    session_dir.mkdir(parents=True, exist_ok=True)
+                    zip_ref.extractall(session_dir)
+            finally:
+                if temp_zip_path.exists():
+                    os.remove(temp_zip_path)
+
+        global _client
+        with _client_lock:
+            _client = None
+
+        return {"status": "success", "message": "Session successfully imported"}
+    except Exception as e:
+        return _error(f"Failed to import session: {str(e)}", status=500, err_type="server_error")
 
 
 @app.post("/v1/chat/completions")

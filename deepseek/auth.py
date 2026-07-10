@@ -261,6 +261,65 @@ def get_session(
     return login(profile_dir=profile_dir, assume_logged_out=True)
 
 
+def export_session(session_dir: Path, output_zip: Path) -> None:
+    """Pack session.json and the browser profile folder into a zip file,
+    excluding large cache and temporary files to keep the archive small."""
+    import zipfile
+
+    ignored_patterns = [
+        "cache",
+        "crash",
+        "logs",
+        "network action predictor",
+        "history",
+        "favicon",
+        "safe browsing",
+        "extension",
+        "temp",
+        "tmp",
+    ]
+
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(session_dir):
+            for file in files:
+                file_path = Path(root) / file
+                try:
+                    rel_path = file_path.relative_to(session_dir)
+                except ValueError:
+                    continue
+                rel_path_str = str(rel_path).lower()
+
+                # Check if path should be ignored
+                if any(pat in rel_path_str for pat in ignored_patterns):
+                    continue
+
+                # Also ignore the zip file itself if it's placed inside session_dir
+                if file_path.resolve() == output_zip.resolve():
+                    continue
+
+                zipf.write(file_path, arcname=rel_path)
+
+
 if __name__ == "__main__":
-    s = login()
-    print(f"[auth] captured token {s.token[:10]}... ({len(s.cookies)} cookies)")
+    import argparse
+    parser = argparse.ArgumentParser(description="DeepSeek Authentication and Session Management")
+    parser.add_argument("--export", action="store_true", help="Export the current session and profile to a session.zip file")
+    args = parser.parse_args()
+
+    if args.export:
+        session_dir = ROOT / "session"
+        output_zip = ROOT / "session.zip"
+        if not session_dir.exists():
+            print(f"[auth] Error: Session directory '{session_dir}' does not exist. Run login first.")
+            exit(1)
+
+        print(f"[auth] Exporting session from '{session_dir}' to '{output_zip}'...")
+        try:
+            export_session(session_dir, output_zip)
+            print(f"[auth] Session successfully exported to '{output_zip}'!")
+        except Exception as e:
+            print(f"[auth] Export failed: {e}")
+            exit(1)
+    else:
+        s = login()
+        print(f"[auth] captured token {s.token[:10]}... ({len(s.cookies)} cookies)")
