@@ -26,10 +26,24 @@ CLEANUP_EPHEMERAL_CHATS = os.getenv("CLEANUP_EPHEMERAL_CHATS", "1").lower() not 
 #
 # "vision" is deferred: it only does anything with an image attached, which needs
 # ref_file_ids / file-upload plumbing we don't have yet.
-MODEL_MAP = {
-    "deepseek-chat":   "default",   # Instant — the fast default model
-    "deepseek-expert": "expert",    # Expert  — the stronger, slower model
+VIRTUAL_MODELS = {
+    "deepseek-chat":           {"model_type": "default", "thinking": False, "search": False},
+    "deepseek-expert":         {"model_type": "expert",  "thinking": False, "search": False},
+    
+    # DeepThink (Reasoning) virtual models
+    "deepseek-reasoner":       {"model_type": "default", "thinking": True,  "search": False},
+    "deepseek-chat-think":     {"model_type": "default", "thinking": True,  "search": False},
+    "deepseek-expert-think":   {"model_type": "expert",  "thinking": True,  "search": False},
+    
+    # Web Search virtual models
+    "deepseek-chat-search":    {"model_type": "default", "thinking": False, "search": True},
+    "deepseek-expert-search":  {"model_type": "expert",  "thinking": False, "search": True},
+    
+    # Combined virtual models
+    "deepseek-expert-all":     {"model_type": "expert",  "thinking": True,  "search": True},
 }
+
+MODEL_MAP = {k: v["model_type"] for k, v in VIRTUAL_MODELS.items()}
 
 DEFAULT_MODEL = "deepseek-chat"
 
@@ -45,3 +59,8 @@ def resolve_model_type(name: str) -> str:
     Caller must check `is_known_model` first; this raises KeyError otherwise.
     """
     return MODEL_MAP[name]
+
+
+def resolve_virtual_model(name: str) -> dict:
+    """Translate a public model id to its virtual model settings (model_type, thinking, search)."""
+    return VIRTUAL_MODELS.get(name, {"model_type": "default", "thinking": False, "search": False})

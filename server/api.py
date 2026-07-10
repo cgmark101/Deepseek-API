@@ -46,6 +46,7 @@ from .config import (
     CLEANUP_EPHEMERAL_CHATS,
     is_known_model,
     resolve_model_type,
+    resolve_virtual_model,
 )
 from .openai_format import completion_response, messages_to_prompt, stream_chunks
 from .ratelimit import RateLimiter, install_rate_limit
@@ -302,9 +303,12 @@ async def chat_completions(
         _active_completions += 1
 
     try:
-        # A thread's model is fixed when it's created, so on resume we ignore `model`
-        # (the OpenAI SDK always sends one) and let the existing thread's model stand.
-        model_type = None if req.conversation_id else resolve_model_type(req.model)
+        # Resolve virtual model settings
+        model_config = resolve_virtual_model(req.model)
+        model_type = None if req.conversation_id else model_config["model_type"]
+        thinking_enabled = model_config["thinking"] or bool(req.thinking)
+        search_enabled = model_config["search"] or bool(req.search)
+
         prompt = messages_to_prompt(req.messages)
 
         try:
@@ -323,7 +327,7 @@ async def chat_completions(
                 try:
                     stream = client.stream(
                         prompt, conversation_id=req.conversation_id,
-                        model=model_type, thinking=req.thinking, search=req.search,
+                        model=model_type, thinking=thinking_enabled, search=search_enabled,
                     )
                     yield from stream_chunks(req.model, stream)
                 finally:
@@ -339,8 +343,12 @@ async def chat_completions(
 
         try:
             reply = await run_in_threadpool(
-                client.chat, prompt, req.conversation_id,
-                model_type, req.thinking, req.search,
+                client.chat,
+                prompt,
+                conversation_id=req.conversation_id,
+                model=model_type,
+                thinking=thinking_enabled,
+                search=search_enabled,
             )
             if CLEANUP_EPHEMERAL_CHATS and not req.conversation_id:
                 try:
