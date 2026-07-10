@@ -27,6 +27,7 @@ import os
 import zipfile
 import shutil
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -57,6 +58,10 @@ install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
 _client_lock = threading.Lock()
+
+# Track active in-flight chat completion requests
+_active_completions = 0
+_active_completions_lock = threading.Lock()
 
 
 def get_client() -> DeepSeekClient:
@@ -128,17 +133,28 @@ def healthz(token: HTTPAuthorizationCredentials | None = Security(security_schem
     status = "ok"
     session_data = None
 
+    root = Path(__file__).resolve().parent.parent
+    profile_dir = root / "session" / "profile"
+    wasm_path = root / "deepseek" / "sha3_wasm_bg.wasm"
+
     if cached_session:
         is_expired = cached_session.age >= SESSION_MAX_AGE
         if is_expired:
             status = "warning"
+        
+        remaining = max(0.0, SESSION_MAX_AGE - cached_session.age)
+        captured_dt = datetime.fromtimestamp(cached_session.captured_at, tz=timezone.utc)
+        expires_dt = datetime.fromtimestamp(cached_session.captured_at + SESSION_MAX_AGE, tz=timezone.utc)
         
         if is_authorized:
             session_data = {
                 "loaded": True,
                 "age_seconds": round(cached_session.age, 1),
                 "max_age_seconds": SESSION_MAX_AGE,
+                "remaining_seconds": round(remaining, 1),
                 "expired": is_expired,
+                "captured_at_iso": captured_dt.isoformat(),
+                "expires_at_iso": expires_dt.isoformat(),
                 "token_preview": f"{cached_session.token[:8]}..." if cached_session.token else None,
                 "cookies_count": len(cached_session.cookies) if cached_session.cookies else 0,
                 "user_agent": cached_session.user_agent
@@ -146,7 +162,8 @@ def healthz(token: HTTPAuthorizationCredentials | None = Security(security_schem
         else:
             session_data = {
                 "loaded": True,
-                "expired": is_expired
+                "expired": is_expired,
+                "remaining_seconds": round(remaining, 1)
             }
     else:
         status = "error"
@@ -155,9 +172,18 @@ def healthz(token: HTTPAuthorizationCredentials | None = Security(security_schem
             "message": "No session found on disk."
         }
 
+    system_data = None
+    if is_authorized:
+        system_data = {
+            "browser_profile_exists": profile_dir.exists(),
+            "pow_wasm_exists": wasm_path.exists(),
+            "active_completions": _active_completions
+        }
+
     return {
         "status": status,
-        "session": session_data
+        "session": session_data,
+        "system": system_data
     }
 
 
@@ -250,36 +276,50 @@ async def chat_completions(
             status=404, err_type="model_not_found",
         )
 
-    # A thread's model is fixed when it's created, so on resume we ignore `model`
-    # (the OpenAI SDK always sends one) and let the existing thread's model stand.
-    model_type = None if req.conversation_id else resolve_model_type(req.model)
-    prompt = messages_to_prompt(req.messages)
+    global _active_completions
+    with _active_completions_lock:
+        _active_completions += 1
 
     try:
-        # Off the event loop: get_client() uses Playwright's sync API, which
-        # errors if run inside the asyncio loop.
-        client = await run_in_threadpool(get_client)
-    except LoginRequired as e:
-        return _error(str(e), status=503, err_type="login_required")
-    except Exception as e:  # session/login failure
-        return _error(f"Failed to initialise DeepSeek session: {e}")
+        # A thread's model is fixed when it's created, so on resume we ignore `model`
+        # (the OpenAI SDK always sends one) and let the existing thread's model stand.
+        model_type = None if req.conversation_id else resolve_model_type(req.model)
+        prompt = messages_to_prompt(req.messages)
 
-    if req.stream:
-        def gen():
-            stream = client.stream(
-                prompt, conversation_id=req.conversation_id,
-                model=model_type, thinking=req.thinking, search=req.search,
+        try:
+            # Off the event loop: get_client() uses Playwright's sync API, which
+            # errors if run inside the asyncio loop.
+            client = await run_in_threadpool(get_client)
+        except LoginRequired as e:
+            return _error(str(e), status=503, err_type="login_required")
+        except Exception as e:  # session/login failure
+            return _error(f"Failed to initialise DeepSeek session: {e}")
+
+        if req.stream:
+            def gen():
+                global _active_completions
+                try:
+                    stream = client.stream(
+                        prompt, conversation_id=req.conversation_id,
+                        model=model_type, thinking=req.thinking, search=req.search,
+                    )
+                    yield from stream_chunks(req.model, stream)
+                finally:
+                    with _active_completions_lock:
+                        _active_completions -= 1
+
+            return StreamingResponse(gen(), media_type="text/event-stream")
+
+        try:
+            reply = await run_in_threadpool(
+                client.chat, prompt, req.conversation_id,
+                model_type, req.thinking, req.search,
             )
-            yield from stream_chunks(req.model, stream)
+        except Exception as e:
+            return _error(f"DeepSeek request failed: {e}")
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    try:
-        reply = await run_in_threadpool(
-            client.chat, prompt, req.conversation_id,
-            model_type, req.thinking, req.search,
-        )
-    except Exception as e:
-        return _error(f"DeepSeek request failed: {e}")
-
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+        return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+    finally:
+        if not req.stream:
+            with _active_completions_lock:
+                _active_completions -= 1
