@@ -62,13 +62,16 @@ def _est_tokens(text: str) -> int:
 
 
 def completion_response(model: str, content: str, prompt: str,
-                        conversation_id: str = None) -> dict:
+                        conversation_id: str = None, reasoning_content: str = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
     send back to resume the conversation.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content)
+    message = {"role": "assistant", "content": content}
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
     return {
         "id": _id(),
         "object": "chat.completion",
@@ -78,7 +81,7 @@ def completion_response(model: str, content: str, prompt: str,
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop",
             }
         ],
@@ -90,11 +93,10 @@ def completion_response(model: str, content: str, prompt: str,
     }
 
 
-def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
-    """Yield OpenAI SSE lines (`data: {...}\\n\\n`) for a streamed completion.
+def stream_chunks(model: str, stream: Iterable[tuple[str, str]]) -> Iterable[str]:
+    """Yield OpenAI SSE lines (`data: {...}\n\n`) for a streamed completion.
 
-    `stream` is the client's stream object; after it's consumed we read its
-    `.conversation_id` and attach it to the final chunk.
+    `stream` is the client's stream object yielding (type, text) tuples.
     """
     cid, created = _id(), _now()
 
@@ -111,10 +113,13 @@ def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
         return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
     # First frame announces the assistant role.
-    yield frame({"role": "assistant", "content": ""})
-    for d in stream:
+    yield frame({"role": "assistant"})
+    for chunk_type, d in stream:
         if d:
-            yield frame({"content": d})
+            if chunk_type == "thinking":
+                yield frame({"reasoning_content": d})
+            else:
+                yield frame({"content": d})
     conversation_id = getattr(stream, "conversation_id", None)
     yield frame({}, finish="stop", extra={"conversation_id": conversation_id})
     yield "data: [DONE]\n\n"

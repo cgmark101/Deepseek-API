@@ -65,6 +65,7 @@ class Reply:
 
     text: str
     conversation_id: str
+    thinking_text: Optional[str] = None
 
     def __str__(self) -> str:  # so print(reply) shows the text
         return self.text
@@ -179,8 +180,17 @@ class DeepSeekClient:
         """Return the complete reply (`.text`) plus its `.conversation_id`."""
         s = self.stream(prompt, conversation_id=conversation_id,
                         model=model, thinking=thinking, search=search)
-        text = "".join(s)
-        return Reply(text=text, conversation_id=s.conversation_id)
+        content_parts = []
+        thinking_parts = []
+        for chunk_type, text in s:
+            if chunk_type == "thinking":
+                thinking_parts.append(text)
+            else:
+                content_parts.append(text)
+        
+        reply_text = "".join(content_parts)
+        thinking_text = "".join(thinking_parts) if thinking_parts else None
+        return Reply(text=reply_text, conversation_id=s.conversation_id, thinking_text=thinking_text)
 
     def close(self) -> None:
         self._http.close()
@@ -211,7 +221,7 @@ class _Stream:
     def session_id(self) -> str:
         return self._session_id
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[tuple[str, str]]:
         body = {
             "chat_session_id": self._session_id,
             "parent_message_id": self._parent_id,
@@ -241,7 +251,7 @@ class _Stream:
         return _encode_cid(self._session_id, self._message_id)
 
 
-def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
+def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
     """Turn DeepSeek's SSE completion stream into reply-text deltas.
 
     The stream sends an initial snapshot frame whose `v` is the full response
@@ -256,6 +266,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     """
     active_path: Optional[str] = None
     emitted_initial = False
+    current_type = "content"
 
     for line in lines:
         if not line or not line.startswith("data:"):
@@ -275,11 +286,11 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             if meta is not None:
                 _capture_message_id(meta, v)
             for frag in v["response"].get("fragments", []):
-                if frag.get("type") == "RESPONSE" and frag.get("content"):
+                frag_type = frag.get("type")
+                if frag_type in ("THINK", "RESPONSE") and frag.get("content"):
+                    current_type = "thinking" if frag_type == "THINK" else "content"
                     active_path = "response/fragments/-1/content"
-                    if not emitted_initial:
-                        emitted_initial = True
-                        yield frag["content"]
+                    yield (current_type, frag["content"])
             continue
 
         # Path-setting append frame.
@@ -288,14 +299,25 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             if meta is not None and active_path.endswith("message_id") \
                     and isinstance(v, int):
                 meta["message_id"] = v
+            
+            # Check if we are appending a new fragment
+            if active_path == "response/fragments" and obj.get("o") == "APPEND" and isinstance(v, list):
+                for frag in v:
+                    if isinstance(frag, dict) and "type" in frag:
+                        frag_type = frag.get("type")
+                        current_type = "thinking" if frag_type == "THINK" else "content"
+                        if frag.get("content"):
+                            yield (current_type, frag["content"])
+                continue
+
             if obj.get("o") == "APPEND" and isinstance(v, str) \
                     and active_path.endswith("content"):
-                yield v
+                yield (current_type, v)
             continue
 
         # Bare append to the current path.
         if isinstance(v, str) and active_path and active_path.endswith("content"):
-            yield v
+            yield (current_type, v)
 
 
 def _capture_message_id(meta: dict, snapshot: dict) -> None:

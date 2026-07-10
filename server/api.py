@@ -359,7 +359,13 @@ async def chat_completions(
         except Exception as e:
             return _error(f"DeepSeek request failed: {e}")
 
-        return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+        return completion_response(
+            req.model,
+            reply.text,
+            prompt,
+            reply.conversation_id,
+            reasoning_content=reply.thinking_text,
+        )
     finally:
         if not req.stream:
             with _active_completions_lock:
