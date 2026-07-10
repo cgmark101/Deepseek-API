@@ -267,6 +267,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
     active_path: Optional[str] = None
     emitted_initial = False
     current_type = "content"
+    fragment_types = {"-1": "content"}
 
     for line in lines:
         if not line or not line.startswith("data:"):
@@ -287,10 +288,15 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
                 _capture_message_id(meta, v)
             for frag in v["response"].get("fragments", []):
                 frag_type = frag.get("type")
-                if frag_type in ("THINK", "RESPONSE") and frag.get("content"):
-                    current_type = "thinking" if frag_type == "THINK" else "content"
+                if frag_type in ("THINK", "RESPONSE"):
+                    t = "thinking" if frag_type == "THINK" else "content"
+                    fid = str(frag.get("id"))
+                    fragment_types[fid] = t
+                    fragment_types["-1"] = t
+                    current_type = t
                     active_path = "response/fragments/-1/content"
-                    yield (current_type, frag["content"])
+                    if frag.get("content"):
+                        yield (t, frag["content"])
             continue
 
         # Path-setting append frame.
@@ -305,19 +311,30 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
                 for frag in v:
                     if isinstance(frag, dict) and "type" in frag:
                         frag_type = frag.get("type")
-                        current_type = "thinking" if frag_type == "THINK" else "content"
+                        t = "thinking" if frag_type == "THINK" else "content"
+                        fid = str(frag.get("id"))
+                        fragment_types[fid] = t
+                        fragment_types["-1"] = t
+                        current_type = t
                         if frag.get("content"):
-                            yield (current_type, frag["content"])
+                            yield (t, frag["content"])
                 continue
 
-            if obj.get("o") == "APPEND" and isinstance(v, str) \
-                    and active_path.endswith("content"):
-                yield (current_type, v)
+            if active_path.endswith("content") and isinstance(v, str):
+                t = current_type
+                parts = active_path.split("/")
+                if len(parts) > 2 and parts[1] == "fragments":
+                    t = fragment_types.get(parts[2], current_type)
+                yield (t, v)
             continue
 
         # Bare append to the current path.
         if isinstance(v, str) and active_path and active_path.endswith("content"):
-            yield (current_type, v)
+            t = current_type
+            parts = active_path.split("/")
+            if len(parts) > 2 and parts[1] == "fragments":
+                t = fragment_types.get(parts[2], current_type)
+            yield (t, v)
 
 
 def _capture_message_id(meta: dict, snapshot: dict) -> None:
