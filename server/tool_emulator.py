@@ -50,7 +50,7 @@ def inject_tools_instruction(messages: List[ChatMessage], tools: List[dict]) -> 
 
 
 def parse_static_tool_call(text: str) -> Tuple[Optional[str], Optional[List[dict]]]:
-    """Parse static text response for tool calls.
+    """Parse static text response for tool calls (XML tag or raw JSON block).
     
     Returns:
         Tuple[clean_text, tool_calls_list]
@@ -59,36 +59,52 @@ def parse_static_tool_call(text: str) -> Tuple[Optional[str], Optional[List[dict
     if not text:
         return text, None
         
+    # Try XML tag first
     match = re.search(r'<tool_call>(.*?)</tool_call>', text, re.DOTALL)
-    if not match:
+    json_str = None
+    matched_text = None
+    
+    if match:
+        json_str = match.group(1).strip()
+        matched_text = match.group(0)
+    else:
+        # Try finding any JSON block containing "tool" or "name" with "arguments"
+        json_match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+            matched_text = json_match.group(0)
+            
+    if not json_str:
         return text, None
         
-    json_str = match.group(1).strip()
     try:
-        call_data = json.loads(json_str)
-        func_name = call_data.get("name")
-        arguments = call_data.get("arguments", {})
+        data = json.loads(json_str)
+        func_name = data.get("name") or data.get("tool")
+        arguments = data.get("arguments")
         
-        # Build the OpenAI tool call format
-        tool_call = {
-            "id": "call_" + uuid.uuid4().hex[:12],
-            "type": "function",
-            "function": {
-                "name": func_name,
-                "arguments": json.dumps(arguments, ensure_ascii=False)
+        if func_name and arguments is not None:
+            # Build the OpenAI tool call format
+            tool_call = {
+                "id": "call_" + uuid.uuid4().hex[:12],
+                "type": "function",
+                "function": {
+                    "name": func_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else str(arguments)
+                }
             }
-        }
-        # Clean up text by removing the tag block
-        clean_text = text.replace(match.group(0), "").strip()
-        return clean_text or None, [tool_call]
+            # Clean up text by removing the matched block
+            clean_text = text.replace(matched_text, "").strip()
+            return clean_text or None, [tool_call]
     except Exception:
-        # If it contains the tag but is invalid JSON, return it as normal text
-        return text, None
+        pass
+        
+    return text, None
 
 
 class StreamToolParser:
     def __init__(self):
         self.in_tool_call = False
+        self.start_with_json = False
         self.tool_call_id = None
         self.tag_buffer = ""
         self.json_buffer = ""
@@ -109,39 +125,63 @@ class StreamToolParser:
         """
         deltas = []
         
-        # Case 1: We are already inside the tool call tags.
+        # Case 1: We are already inside the tool call tags/JSON block.
         if self.in_tool_call:
             self.json_buffer += chunk
             
-            # Check if we hit the end tag
-            if self.end_tag in self.json_buffer:
-                # Split at end tag
-                json_part, remainder = self.json_buffer.split(self.end_tag, 1)
-                self.json_buffer = remainder
-                self.in_tool_call = False
-                
-                # Parse the final JSON block
-                parsed_deltas = self._parse_json_buffer(json_part, finalize=True)
-                deltas.extend(parsed_deltas)
-            else:
-                # Periodically parse the json buffer to extract function name and arguments
+            if self.start_with_json:
+                # In raw JSON mode, we check periodically and finalize at flush time.
                 parsed_deltas = self._parse_json_buffer(self.json_buffer, finalize=False)
                 deltas.extend(parsed_deltas)
-                
+            else:
+                # XML mode: check for end tag
+                if self.end_tag in self.json_buffer:
+                    json_part, remainder = self.json_buffer.split(self.end_tag, 1)
+                    self.json_buffer = remainder
+                    self.in_tool_call = False
+                    
+                    parsed_deltas = self._parse_json_buffer(json_part, finalize=True)
+                    deltas.extend(parsed_deltas)
+                else:
+                    parsed_deltas = self._parse_json_buffer(self.json_buffer, finalize=False)
+                    deltas.extend(parsed_deltas)
+                    
             return deltas
             
         # Case 2: We are not in a tool call, but we might be starting one.
         self.tag_buffer += chunk
         
-        # Check if the start tag is fully matched
+        # If the tag buffer starts with '{' (ignoring leading whitespace), check for raw JSON tool call
+        stripped_buffer = self.tag_buffer.strip()
+        if stripped_buffer.startswith("{"):
+            if '"name"' in stripped_buffer or '"tool"' in stripped_buffer:
+                self.in_tool_call = True
+                self.start_with_json = True
+                self.tool_call_id = "call_" + uuid.uuid4().hex[:12]
+                self.function_name = ""
+                self.has_sent_initial_delta = False
+                self.sent_args_len = 0
+                self.json_buffer = stripped_buffer
+                self.tag_buffer = ""
+                
+                parsed_deltas = self._parse_json_buffer(self.json_buffer, finalize=False)
+                deltas.extend(parsed_deltas)
+                return deltas
+            elif len(stripped_buffer) > 100:
+                # Flush as normal text if it grows too large without match
+                deltas.append({"content": self.tag_buffer})
+                self.tag_buffer = ""
+            return deltas
+            
+        # Check if the start XML tag is fully matched
         if self.start_tag in self.tag_buffer:
             self.in_tool_call = True
+            self.start_with_json = False
             self.tool_call_id = "call_" + uuid.uuid4().hex[:12]
             self.function_name = ""
             self.has_sent_initial_delta = False
             self.sent_args_len = 0
             
-            # The part before the start tag is normal content
             before_tag, remainder = self.tag_buffer.split(self.start_tag, 1)
             if before_tag:
                 deltas.append({"content": before_tag})
@@ -154,8 +194,7 @@ class StreamToolParser:
             return deltas
             
         # Check if the tag buffer is a prefix of the start tag.
-        # If it is NOT, it means it's regular text, so flush it!
-        if not self.start_tag.startswith(self.tag_buffer):
+        if not self.start_tag.startswith(self.tag_buffer) and not self.tag_buffer.strip().startswith("{"):
             deltas.append({"content": self.tag_buffer})
             self.tag_buffer = ""
             
@@ -164,7 +203,12 @@ class StreamToolParser:
     def flush(self) -> List[dict]:
         """Call this at the end of the stream to yield any remaining buffered text."""
         deltas = []
-        if self.tag_buffer:
+        if self.in_tool_call and self.start_with_json:
+            self.in_tool_call = False
+            parsed_deltas = self._parse_json_buffer(self.json_buffer, finalize=True)
+            deltas.extend(parsed_deltas)
+            self.json_buffer = ""
+        elif self.tag_buffer:
             deltas.append({"content": self.tag_buffer})
             self.tag_buffer = ""
         return deltas
@@ -174,8 +218,8 @@ class StreamToolParser:
         deltas = []
         
         if not self.has_sent_initial_delta:
-            # Look for "name"\s*:\s*"([^"]+)"
-            match = re.search(r'"name"\s*:\s*"([^"]*)"', json_str)
+            # Look for "name" or "tool"
+            match = re.search(r'"(?:name|tool)"\s*:\s*"([^"]*)"', json_str)
             if match:
                 self.function_name = match.group(1)
                 
