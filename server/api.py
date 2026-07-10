@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Header
+from fastapi import FastAPI, UploadFile, File, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -85,13 +85,41 @@ def _error(message: str, status: int = 500, err_type: str = "server_error"):
     )
 
 
+def check_api_key(request: Request) -> JSONResponse | None:
+    """Validate that the request has a valid Authorization: Bearer <API_KEY> header
+    if SERVER_API_KEY is configured in the environment."""
+    api_key = os.getenv("SERVER_API_KEY")
+    if not api_key:
+        return None
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return _error(
+            "Missing or invalid Authorization header. Expected 'Bearer <API_KEY>'.",
+            status=401,
+            err_type="invalid_request_error"
+        )
+
+    token = auth_header.partition(" ")[2]
+    if token != api_key:
+        return _error(
+            "Incorrect API key provided.",
+            status=401,
+            err_type="invalid_request_error"
+        )
+    return None
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
 
 @app.get("/v1/models")
-def list_models():
+def list_models(request: Request):
+    err = check_api_key(request)
+    if err:
+        return err
     created = int(time.time())
     return {
         "object": "list",
@@ -107,7 +135,7 @@ async def import_session(
     file: UploadFile = File(...),
     x_import_key: str | None = Header(None, alias="X-Import-Key")
 ):
-    import_key = os.getenv("SESSION_IMPORT_KEY")
+    import_key = os.getenv("SESSION_IMPORT_KEY") or os.getenv("SERVER_API_KEY")
     if import_key and x_import_key != import_key:
         return _error("Forbidden: Invalid X-Import-Key", status=403, err_type="forbidden")
 
@@ -158,7 +186,10 @@ async def import_session(
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, request: Request):
+    err = check_api_key(request)
+    if err:
+        return err
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
 
