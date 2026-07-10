@@ -63,6 +63,25 @@ _client_lock = threading.Lock()
 _active_completions = 0
 _active_completions_lock = threading.Lock()
 
+_playwright_ready: bool | None = None
+
+
+def is_playwright_ready() -> bool:
+    """Check if Playwright is installed and has the Chromium browser executable ready."""
+    global _playwright_ready
+    if _playwright_ready is True:
+        return True
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            exec_path = Path(p.chromium.executable_path)
+            if exec_path.exists():
+                _playwright_ready = True
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def get_client() -> DeepSeekClient:
     """Build (once) the shared client and its signed-in session.
@@ -177,6 +196,7 @@ def healthz(token: HTTPAuthorizationCredentials | None = Security(security_schem
         system_data = {
             "browser_profile_exists": profile_dir.exists(),
             "pow_wasm_exists": wasm_path.exists(),
+            "playwright_browser_installed": is_playwright_ready(),
             "active_completions": _active_completions
         }
 
