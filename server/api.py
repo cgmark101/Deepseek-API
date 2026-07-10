@@ -309,7 +309,15 @@ async def chat_completions(
         thinking_enabled = model_config["thinking"] or bool(req.thinking)
         search_enabled = model_config["search"] or bool(req.search)
 
-        prompt = messages_to_prompt(req.messages)
+        # Check if we should emulate tools
+        emulate_tools = bool(req.tools)
+        if emulate_tools:
+            from .tool_emulator import inject_tools_instruction
+            messages = inject_tools_instruction(req.messages, req.tools)
+        else:
+            messages = req.messages
+
+        prompt = messages_to_prompt(messages)
 
         try:
             # Off the event loop: get_client() uses Playwright's sync API, which
@@ -329,7 +337,7 @@ async def chat_completions(
                         prompt, conversation_id=req.conversation_id,
                         model=model_type, thinking=thinking_enabled, search=search_enabled,
                     )
-                    yield from stream_chunks(req.model, stream)
+                    yield from stream_chunks(req.model, stream, emulate_tools=emulate_tools)
                 finally:
                     if CLEANUP_EPHEMERAL_CHATS and not req.conversation_id and stream is not None:
                         try:
@@ -359,12 +367,19 @@ async def chat_completions(
         except Exception as e:
             return _error(f"DeepSeek request failed: {e}")
 
+        clean_content = reply.text
+        tool_calls = None
+        if emulate_tools:
+            from .tool_emulator import parse_static_tool_call
+            clean_content, tool_calls = parse_static_tool_call(reply.text)
+
         return completion_response(
             req.model,
-            reply.text,
+            clean_content,
             prompt,
             reply.conversation_id,
             reasoning_content=reply.thinking_text,
+            tool_calls=tool_calls,
         )
     finally:
         if not req.stream:

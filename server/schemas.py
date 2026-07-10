@@ -31,3 +31,5 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     user: Optional[str] = None
+    tools: Optional[List[dict]] = None
+    tool_choice: Optional[Union[str, dict]] = None

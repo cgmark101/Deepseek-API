@@ -14,6 +14,9 @@ from typing import Iterable, List
 
 from .schemas import ChatMessage
 
+from typing import Iterable, List, Optional
+
+# ... rest of helper imports ...
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 
 
@@ -61,17 +64,27 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def completion_response(model: str, content: str, prompt: str,
-                        conversation_id: str = None, reasoning_content: str = None) -> dict:
+def completion_response(model: str, content: Optional[str], prompt: str,
+                        conversation_id: str = None, reasoning_content: str = None,
+                        tool_calls: Optional[List[dict]] = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
     send back to resume the conversation.
     """
-    pt, ct = _est_tokens(prompt), _est_tokens(content)
+    pt = _est_tokens(prompt)
+    ct = _est_tokens(content or "")
+    
     message = {"role": "assistant", "content": content}
+    finish_reason = "stop"
+    
     if reasoning_content:
         message["reasoning_content"] = reasoning_content
+        
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        finish_reason = "tool_calls"
+        
     return {
         "id": _id(),
         "object": "chat.completion",
@@ -82,7 +95,7 @@ def completion_response(model: str, content: str, prompt: str,
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {
@@ -93,7 +106,7 @@ def completion_response(model: str, content: str, prompt: str,
     }
 
 
-def stream_chunks(model: str, stream: Iterable[tuple[str, str]]) -> Iterable[str]:
+def stream_chunks(model: str, stream: Iterable[tuple[str, str]], emulate_tools: bool = False) -> Iterable[str]:
     """Yield OpenAI SSE lines (`data: {...}\n\n`) for a streamed completion.
 
     `stream` is the client's stream object yielding (type, text) tuples.
@@ -114,12 +127,38 @@ def stream_chunks(model: str, stream: Iterable[tuple[str, str]]) -> Iterable[str
 
     # First frame announces the assistant role.
     yield frame({"role": "assistant"})
-    for chunk_type, d in stream:
-        if d:
+    
+    finish_reason = "stop"
+    
+    if emulate_tools:
+        from .tool_emulator import StreamToolParser
+        parser = StreamToolParser()
+        
+        for chunk_type, d in stream:
+            if not d:
+                continue
             if chunk_type == "thinking":
                 yield frame({"reasoning_content": d})
             else:
-                yield frame({"content": d})
+                for delta in parser.feed(d):
+                    if "tool_calls" in delta:
+                        finish_reason = "tool_calls"
+                        yield frame(delta)
+                    elif "content" in delta:
+                        yield frame({"content": delta["content"]})
+                        
+        # Flush any remaining text in the parser's buffer
+        for delta in parser.flush():
+            if "content" in delta:
+                yield frame({"content": delta["content"]})
+    else:
+        for chunk_type, d in stream:
+            if d:
+                if chunk_type == "thinking":
+                    yield frame({"reasoning_content": d})
+                else:
+                    yield frame({"content": d})
+                    
     conversation_id = getattr(stream, "conversation_id", None)
-    yield frame({}, finish="stop", extra={"conversation_id": conversation_id})
+    yield frame({}, finish=finish_reason, extra={"conversation_id": conversation_id})
     yield "data: [DONE]\n\n"
