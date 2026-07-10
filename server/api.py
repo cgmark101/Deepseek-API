@@ -30,7 +30,8 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Header, Request
+from fastapi import FastAPI, UploadFile, File, Request, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -85,23 +86,25 @@ def _error(message: str, status: int = 500, err_type: str = "server_error"):
     )
 
 
-def check_api_key(request: Request) -> JSONResponse | None:
+security_scheme = HTTPBearer(auto_error=False)
+import_key_scheme = APIKeyHeader(name="X-Import-Key", auto_error=False)
+
+
+def check_api_key(token: HTTPAuthorizationCredentials | None) -> JSONResponse | None:
     """Validate that the request has a valid Authorization: Bearer <API_KEY> header
     if SERVER_API_KEY is configured in the environment."""
     api_key = os.getenv("SERVER_API_KEY")
     if not api_key:
         return None
 
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
+    if not token or not token.credentials:
         return _error(
             "Missing or invalid Authorization header. Expected 'Bearer <API_KEY>'.",
             status=401,
             err_type="invalid_request_error"
         )
 
-    token = auth_header.partition(" ")[2]
-    if token != api_key:
+    if token.credentials != api_key:
         return _error(
             "Incorrect API key provided.",
             status=401,
@@ -116,8 +119,8 @@ def healthz():
 
 
 @app.get("/v1/models")
-def list_models(request: Request):
-    err = check_api_key(request)
+def list_models(token: HTTPAuthorizationCredentials | None = Security(security_scheme)):
+    err = check_api_key(token)
     if err:
         return err
     created = int(time.time())
@@ -133,7 +136,7 @@ def list_models(request: Request):
 @app.post("/v1/session/import")
 async def import_session(
     file: UploadFile = File(...),
-    x_import_key: str | None = Header(None, alias="X-Import-Key")
+    x_import_key: str | None = Security(import_key_scheme)
 ):
     import_key = os.getenv("SESSION_IMPORT_KEY") or os.getenv("SERVER_API_KEY")
     if import_key and x_import_key != import_key:
@@ -186,8 +189,12 @@ async def import_session(
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, request: Request):
-    err = check_api_key(request)
+async def chat_completions(
+    req: ChatCompletionRequest,
+    request: Request,
+    token: HTTPAuthorizationCredentials | None = Security(security_scheme)
+):
+    err = check_api_key(token)
     if err:
         return err
     if not req.messages:
