@@ -35,7 +35,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHea
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from deepseek.auth import LoginRequired
+from deepseek.auth import LoginRequired, Session, DEFAULT_SESSION_FILE
 from deepseek.client import DeepSeekClient
 
 from .config import (
@@ -114,8 +114,51 @@ def check_api_key(token: HTTPAuthorizationCredentials | None) -> JSONResponse | 
 
 
 @app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
+@app.get("/health")
+def healthz(token: HTTPAuthorizationCredentials | None = Security(security_scheme)):
+    from deepseek.auth import SESSION_MAX_AGE
+    
+    is_authorized = True
+    if os.getenv("SERVER_API_KEY"):
+        err = check_api_key(token)
+        if err:
+            is_authorized = False
+
+    cached_session = Session.load(DEFAULT_SESSION_FILE)
+    status = "ok"
+    session_data = None
+
+    if cached_session:
+        is_expired = cached_session.age >= SESSION_MAX_AGE
+        if is_expired:
+            status = "warning"
+        
+        if is_authorized:
+            session_data = {
+                "loaded": True,
+                "age_seconds": round(cached_session.age, 1),
+                "max_age_seconds": SESSION_MAX_AGE,
+                "expired": is_expired,
+                "token_preview": f"{cached_session.token[:8]}..." if cached_session.token else None,
+                "cookies_count": len(cached_session.cookies) if cached_session.cookies else 0,
+                "user_agent": cached_session.user_agent
+            }
+        else:
+            session_data = {
+                "loaded": True,
+                "expired": is_expired
+            }
+    else:
+        status = "error"
+        session_data = {
+            "loaded": False,
+            "message": "No session found on disk."
+        }
+
+    return {
+        "status": status,
+        "session": session_data
+    }
 
 
 @app.get("/v1/models")
