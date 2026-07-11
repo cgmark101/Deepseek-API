@@ -36,7 +36,7 @@ SIGNIN_URL = "https://chat.deepseek.com/sign_in"
 
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 # Token is trusted for this long before we refresh it from the browser again.
-SESSION_MAX_AGE = 6 * 60 * 60  # 6 hours
+SESSION_MAX_AGE = 30 * 24 * 60 * 60  # 30 days
 
 
 class LoginRequired(RuntimeError):
