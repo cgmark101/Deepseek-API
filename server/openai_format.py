@@ -83,6 +83,7 @@ def completion_response(model: str, content: Optional[str], prompt: str,
         
     if tool_calls:
         message["tool_calls"] = tool_calls
+        message["content"] = None
         finish_reason = "tool_calls"
         
     return {
@@ -134,7 +135,7 @@ def stream_chunks(model: str, stream: Iterable[tuple[str, str]], emulate_tools: 
     if emulate_tools:
         buffer_text = ""
         is_tool_call = False
-        detection_chars_needed = 60
+        detection_chars_needed = 200
         
         # Pull chunks until we can determine if it starts a tool call
         for chunk_type, d in stream_iterator:
@@ -149,7 +150,7 @@ def stream_chunks(model: str, stream: Iterable[tuple[str, str]], emulate_tools: 
                     break
                     
         stripped = buffer_text.strip()
-        if stripped.startswith("```") or stripped.startswith("{") or "tool_calls" in stripped:
+        if ("```" in stripped or "{" in stripped) and ("tool_calls" in stripped or name in stripped):
             is_tool_call = True
             
         if is_tool_call:

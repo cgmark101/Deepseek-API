@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
+import time
 import os
 import zipfile
 import shutil
@@ -60,6 +61,7 @@ install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
 _client_lock = threading.Lock()
+_client_birth = 0.0
 
 # Track active in-flight chat completion requests
 _active_completions = 0

@@ -1,7 +1,8 @@
-import json
-import uuid
+import json, uuid, re
 from typing import List, Tuple, Optional
 from .schemas import ChatMessage
+
+NL = chr(10)
 
 SYSTEM_TOOL_PROMPT = """[SYSTEM INSTRUCTION]
 You have access to the following tools/functions:
@@ -21,81 +22,96 @@ If you need to use a tool to answer the user's question, you MUST reply with a J
 where 'arguments' is a JSON object containing parameter values. Do not output any conversational text before or after this JSON block when calling a tool. If you do not need any tools, reply normally in plain text.
 """
 
-
-def inject_tools_instruction(messages: List[ChatMessage], tools: List[dict]) -> List[ChatMessage]:
-    """Inject tool descriptions and execution instructions into the messages history."""
+def inject_tools_instruction(messages, tools):
     if not tools:
         return messages
-    
-    # Format the tools cleanly as JSON
     tool_desc = []
     for t in tools:
         if t.get("type") == "function":
             f = t["function"]
             tool_desc.append(
-                f"- Name: {f['name']}\n"
-                f"  Description: {f.get('description', '')}\n"
+                f"- Name: {f['name']}" + NL +
+                f"  Description: {f.get('description', '')}" + NL +
                 f"  Parameters Schema: {json.dumps(f.get('parameters', {}))}"
             )
-            
-    tools_json = "\n\n".join(tool_desc)
-    tool_instructions = SYSTEM_TOOL_PROMPT.format(tools_json=tools_json)
-    
-    new_messages = list(messages)
-    # Check if there is an existing system message
-    system_msg_idx = -1
-    for idx, msg in enumerate(new_messages):
-        if msg.role == "system":
-            system_msg_idx = idx
+    tools_json = (NL * 2).join(tool_desc)
+    ti = SYSTEM_TOOL_PROMPT.format(tools_json=tools_json)
+    msgs = list(messages)
+    idx = -1
+    for i, m in enumerate(msgs):
+        if m.role == "system":
+            idx = i
             break
-            
-    if system_msg_idx != -1:
-        # Append instructions to the existing system prompt
-        existing_content = new_messages[system_msg_idx].content or ""
-        if isinstance(existing_content, str):
-            new_messages[system_msg_idx].content = existing_content + "\n\n" + tool_instructions
+    if idx != -1:
+        c = msgs[idx].content or ""
+        if isinstance(c, str):
+            msgs[idx].content = c + NL * 2 + ti
     else:
-        # Prepend a new system message
-        new_messages.insert(0, ChatMessage(role="system", content=tool_instructions))
-        
-    return new_messages
+        msgs.insert(0, ChatMessage(role="system", content=ti))
+    return msgs
 
+def _extract_json(text):
+    # Strip thinking tags first (reasoning models)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
+    # Try triple backtick block
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if m:
+        c = m.group(1).strip()
+        if c.startswith("{"):
+            return c
+    # Try single backtick prefix
+    m = re.search(r"\`(?:json)?\s*({[\s\S]*?})\s*\`", text)
+    if m:
+        c = m.group(1).strip()
+        if c.startswith("{"):
+            try:
+                json.loads(c)
+                return c
+            except:
+                pass
+    # Try bare JSON object (no backticks)
+    start = text.find('{"tool_calls"')
+    if start == -1:
+        start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except:
+            pass
+    return None
 
-def parse_static_tool_call(text: str) -> Tuple[Optional[str], Optional[List[dict]]]:
-    """Parse static text response for tool calls.
-    
-    Returns:
-        Tuple[clean_text, tool_calls_list]
-        If no tool call is found, returns (text, None).
-    """
+def parse_static_tool_call(text):
     if not text:
         return text, None
-        
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            data = json.loads(text[start:end+1])
-            if "tool_calls" in data and isinstance(data["tool_calls"], list):
-                tool_calls = []
-                for raw_tc in data["tool_calls"]:
-                    args = raw_tc.get("arguments", {})
-                    args_str = json.dumps(args) if isinstance(args, dict) else str(args)
-                    
-                    tc = {
-                        "id": "call_" + uuid.uuid4().hex[:8],
-                        "type": "function",
-                        "function": {
-                            "name": raw_tc.get("name"),
-                            "arguments": args_str
-                        }
-                    }
-                    tool_calls.append(tc)
-                # Clean up text by removing the JSON block
-                clean_text = text[:start] + text[end+1:]
-                clean_text = clean_text.strip()
-                return clean_text or None, tool_calls
-        except Exception:
-            pass
-            
-    return text, None
+    json_str = _extract_json(text)
+    if not json_str:
+        return text, None
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        return text, None
+    if "tool_calls" not in data or not isinstance(data["tool_calls"], list):
+        return text, None
+    tool_calls = []
+    for raw in data["tool_calls"]:
+        if not isinstance(raw, dict):
+            continue
+        args = raw.get("arguments", {})
+        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+        tool_calls.append({
+            "id": "call_" + uuid.uuid4().hex[:8],
+            "type": "function",
+            "function": {
+                "name": raw.get("name"),
+                "arguments": args_str
+            }
+        })
+    clean = text
+    if json_str in clean:
+        clean = clean.replace(json_str, "")
+    clean = re.sub(r"```(?:json)?\s*", "", clean).strip()
+    clean = re.sub(r"```", "", clean).strip()
+    return clean or None, tool_calls
