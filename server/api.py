@@ -88,7 +88,7 @@ def is_playwright_ready() -> bool:
 
 
 def get_client() -> DeepSeekClient:
-    """Build (once) the shared client and its signed-in session.
+    """Build (or reload if expired) the shared client and its signed-in session.
 
     Session resolution: cached file → headless capture off the persistent
     profile. If neither works and SERVER_INTERACTIVE_LOGIN is on (the default),
@@ -99,11 +99,18 @@ def get_client() -> DeepSeekClient:
     This touches Playwright's sync API, so callers must invoke it OFF the event
     loop (via run_in_threadpool); calling it inside the asyncio loop raises
     "Playwright Sync API inside the asyncio loop"."""
-    global _client
-    if _client is None:
+    global _client, _client_birth
+    now = time.time()
+    if _client is None or (now - _client_birth > 3600):
         with _client_lock:
-            if _client is None:
+            if _client is None or (now - _client_birth > 3600):
+                if _client is not None:
+                    try:
+                        _client._http.close()
+                    except Exception:
+                        pass
                 _client = DeepSeekClient(allow_interactive=SERVER_INTERACTIVE_LOGIN)
+                _client_birth = now
     return _client
 
 
