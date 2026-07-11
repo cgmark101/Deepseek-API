@@ -242,6 +242,12 @@ class _Stream:
             "POST", COMPLETION_PATH, json=body, headers=headers
         ) as resp:
             resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if "application/json" in content_type:
+                resp.read()
+                data = resp.json()
+                biz_msg = data.get("data", {}).get("biz_msg") or data.get("msg") or str(data)
+                raise RuntimeError(f"DeepSeek API error: {biz_msg}")
             yield from _parse_sse(resp.iter_lines(), meta)
         if meta.get("message_id") is not None:
             self._message_id = meta["message_id"]
