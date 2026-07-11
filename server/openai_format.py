@@ -150,7 +150,7 @@ def stream_chunks(model: str, stream: Iterable[tuple[str, str]], emulate_tools: 
                     break
                     
         stripped = buffer_text.strip()
-        if ("```" in stripped or "{" in stripped) and ("tool_calls" in stripped or name in stripped):
+        if ("```" in stripped or "{" in stripped) and ("tool_calls" in stripped or "name" in stripped):
             is_tool_call = True
             
         if is_tool_call:
